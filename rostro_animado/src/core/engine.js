@@ -995,6 +995,10 @@
     /* ---------- núcleo: cambiar emoción (con valor de respaldo) ---------- */
     setEmotion: function (id, o) {
       o = o || {};
+      /* v2.3: una orden de emoción explícita cuenta como actividad — reinicia el
+       * reloj idle para que un payload de IA no quede pisado por el standby a los
+       * 60 s ni por el sueño a los 180 s. */
+      if (!o.auto) this._lastActivity = performance.now();
       var def = this._getDef(id);
       if (!def) {
         console.warn('[MoodMates] emoción ID desconocida "' + id + '", recayendo en espera (' + this._fallbackId + ')');

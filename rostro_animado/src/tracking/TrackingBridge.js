@@ -47,6 +47,7 @@
       throw new Error('EngineAdapter: se requiere una instancia del motor MoodMates');
     }
     return {
+      mate: mate,   /* referencia para que el host detecte cambios de instancia */
       setGaze: function (x, y, meta) {
         mate.setGaze(x, y, meta || { source: 'tracker', priority: TRACKER_PRIORITY });
       },
@@ -159,17 +160,34 @@
       /* D13 exclusión mutua: el host decide cómo propagar el owner; se expone
        * como evento para que app/call.js haga policy.setOwner(...) y reacciones. */
       emit('tracking-state', payload);
+      /* v2.3.1 — Señales emocionales SOLO si el bridge es dueño del bot (D13)
+       * y hay política configurada. Antes se emitía handleAIMessage en todo
+       * start/stop/lost: en modo standalone (sin backend de IA) eso secuestraba
+       * la expresión del personaje con '03'/'02' arbitrarios y reiniciaba
+       * transiciones — el usuario veía la animación "luchar" contra el tracker.
+       * opts.signals:false desactiva por completo las señales de emoción. */
+      /* Owner por defecto 'call': si nadie gestiona el owner (modo standalone),
+       * las señales de emoción se suprimen — el tracking solo mueve mirada,
+       * párpados y giro de cabeza, nunca la expresión. */
+      var emotional = opts.signals !== false && !!policy;
       if (s === 'LOST') {
-        adapter.handleAIMessage({ emotionId: policy.tracking('lost') });
+        if (emotional && policy.owner() === 'tracking') {
+          adapter.handleAIMessage({ emotionId: policy.tracking('lost') });
+        }
         adapter.setEyeOpen(null);
         adapter.clearGaze({ source: 'tracker' });
         adapter.setLookYaw(0);
       } else if (s === 'ERROR') {
-        adapter.handleAIMessage({ emotionId: policy.tracking('error') });
+        if (emotional && policy.owner() === 'tracking') {
+          adapter.handleAIMessage({ emotionId: policy.tracking('error') });
+        }
         emit('error', { message: why || 'error de tracking' });
-      } else if (s === 'ACTIVE' && prev !== 'ACQUIRING') {
-        /* Recuperación desde LOST: semilla 'present' (el backend de IA manda después). */
-        adapter.handleAIMessage({ emotionId: policy.tracking('present') });
+      } else if (s === 'ACTIVE' && prev === 'LOST') {
+        /* Recuperación desde LOST: semilla 'present'. Desde ACQUIRING NO se
+         * emite — al arrancar, el motor ya está en su estado natural. */
+        if (emotional && policy.owner() === 'tracking') {
+          adapter.handleAIMessage({ emotionId: policy.tracking('present') });
+        }
       }
     }
 
@@ -298,6 +316,11 @@
             delegate: opts.delegate || 'GPU',
             numFaces: 1
           }, opts.loader || {});
+          /* Normalización de claves: MpLoader usa modelPath; el worker usa
+           * modelUrl. Sin esto, en el camino Worker el landmarker se creaba sin
+           * modelo (modelAssetPath undefined) y la inferencia devolvía 0 caras:
+           * "no sigue el rostro" incluso con todo lo demás correcto. */
+          cfg.modelUrl = cfg.modelUrl || cfg.modelPath;
           backend = T.Backends
             ? T.Backends.create(opts.backend || 'auto', {
                 workerUrl: opts.workerUrl,

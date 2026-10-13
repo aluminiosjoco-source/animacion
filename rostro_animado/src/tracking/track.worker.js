@@ -42,7 +42,7 @@ async function initFaceLandmarker(cfg) {
     (typeof Uint8Array !== 'undefined' && cfg.modelBuffer instanceof Uint8Array);
   var opts = {
     baseOptions: {
-      modelAssetPath: hasBuffer ? undefined : (cfg.modelUrl || undefined),
+      modelAssetPath: hasBuffer ? undefined : (cfg.modelUrl || cfg.modelPath || 'assets/vendor/mediapipe/face_landmarker.task'),
       modelAssetBuffer: hasBuffer ? cfg.modelBuffer : undefined,
       delegate: cfg.delegate || 'GPU'
     },
