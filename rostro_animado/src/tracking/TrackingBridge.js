@@ -126,6 +126,20 @@
       oe.beta != null ? oe.beta : 0.007,
       oe.dCutoff != null ? oe.dCutoff : 1.0);
 
+    /* Selección de rostro objetivo (plan §3). opts.selector permite inyectar
+     * una política propia (mock en tests / VAD externo); opts.maxFaces>1 activa
+     * el FaceSelector por defecto; maxFaces===1 lo desactiva (v2.3 clásico). */
+    var selector = null;
+    if (typeof opts.selector === 'object' && opts.selector && typeof opts.selector.select === 'function') {
+      selector = opts.selector;                       /* política inyectada por el host */
+    } else if (T.FaceSelector && (opts.maxFaces == null ? 3 : opts.maxFaces) > 1) {
+      selector = T.FaceSelector.create(Object.assign(
+        { maxFaces: opts.maxFaces != null ? opts.maxFaces : 3 },
+        opts.selectorOpts || {}));
+    } else {
+      selector = null;                                 /* cara 0 clásico (v2.3) */
+    }
+
     /* ---- vídeo de captura (oculto salvo que el host dé uno visible) ---- */
     var video = opts.videoElement || document.createElement('video');
     if (!opts.videoElement) {
@@ -204,7 +218,16 @@
       lastSeenAt = now;
       if (state !== 'ACTIVE') setState('ACTIVE', 'rostro-detectado');
 
-      var lmArr = raw.faces[0].lm.map(function (p) { return { x: p[0], y: p[1] }; });
+      /* Selección multi-cara (plan §3): FaceSelector decide el objetivo con
+       * histéresis; sin módulo cargado se degrada a cara 0 (comportamiento v2.3). */
+      var selectedFace = raw.faces[0];
+      if (selector) {
+        var pick = selector.select(raw.faces, now);
+        if (!pick) return;                       /* sin caras evaluables este frame */
+        if (pick.switched) emit('face-switch', { index: pick.index, score: pick.score });
+        selectedFace = pick.face;
+      }
+      var lmArr = selectedFace.lm.map(function (p) { return { x: p[0], y: p[1] }; });
 
       var earL = F.eyeAspectRatio(lmArr, 'left');
       var earR = F.eyeAspectRatio(lmArr, 'right');
@@ -326,7 +349,7 @@
             wasmPaths: 'assets/vendor/mediapipe/wasm/',
             modelPath: 'assets/vendor/mediapipe/face_landmarker.task',
             delegate: opts.delegate || 'GPU',
-            numFaces: 1,
+            numFaces: selector ? (opts.maxFaces != null ? opts.maxFaces : 3) : 1,
             /* v2.3.2 — umbrales bajados de 0.5 (default) a 0.3: con iluminación
              * mediocre/webcams de portátil el detector por debajo de 0.5 no
              * entregaba caras y el bridge nunca llegaba a ACTIVE ("no sigue el
@@ -398,8 +421,39 @@
         return bridge;
       },
 
+      /* Reancla el motor objetivo sin reiniciar cámara ni recargar MediaPipe.
+       * Uso: cambio de personaje (createMain destruye la instancia vieja).
+       * Libera los canales del mate viejo (puede estar ya destruido: try/catch),
+       * valida el nuevo contra EngineAdapter y conmuta la referencia atómica. */
+      rebindMate: function (newMate) {
+        var next = T.EngineAdapter(newMate);   /* throws si no es un motor válido */
+        var old = adapter.mate;
+        if (old && old !== newMate) {
+          try {
+            old.clearGaze({ source: 'tracker' });
+            if (typeof old.setEyeOpen === 'function') old.setEyeOpen(null);
+            if (typeof old.setLookYaw === 'function') old.setLookYaw(0);
+          } catch (e) { /* instancia ya destruida: nada que liberar */ }
+        }
+        adapter = next;
+        bank.reset();
+        emit('rebind', { mate: newMate });
+        return bridge;
+      },
+
+      /* Inyección VAD/diarización (plan §3, contrato desacoplado): hint = key o
+       * índice de la cara activa, level ∈ [0,1]. Delega en FaceSelector si hay. */
+      setVoiceActivity: function (hint, level) {
+        if (selector && typeof selector.setVoiceActivity === 'function') {
+          selector.setVoiceActivity(hint, level);
+        }
+        return bridge;
+      },
+      get lockedFaceKey() { return selector ? selector.lockedKey : null; },
+
       destroy: function () {
         bridge.stop();
+        if (selector && typeof selector.reset === 'function') selector.reset();
         listeners.length = 0;
         if (!opts.videoElement && video.parentNode) video.parentNode.removeChild(video);
       }
