@@ -94,7 +94,10 @@
     tipsTimer = setTimeout(function () { elTips.classList.remove('show'); }, 3200);
   }
 
-  /* ---------------- Seguimiento de mirada: pointermove a nivel window, caché de rectángulo 200ms ---------------- */
+  /* ---------------- Seguimiento de mirada por PUNTERO (solo decorativos) ----------------
+   * v2.4: el avatar principal NO recibe mirada del puntero — es territorio
+   * exclusivo del tracker facial (o reposo interno del motor). watchGaze queda
+   * reservado a hero y ficha de marca, que no participan en tracking. */
   var gazeTargets = [];
   function watchGaze(engine, el) {
     gazeTargets.push({ engine: engine, el: el, rect: null, rectAt: 0 });
@@ -124,9 +127,12 @@
       }
       var r = t.rect;
       if (!r.width || !r.height) continue;
+      /* v2.3: fuente nombrada en el árbitro del motor — prioridad 1; mientras el
+       * tracker esté ACTIVE (prioridad 10) el puntero no compite por la mirada. */
       t.engine.setGaze(
         clamp06((e.clientX - (r.left + r.width / 2)) / r.width) / 0.6,
-        clamp06((e.clientY - (r.top + r.height / 2)) / r.height) / 0.6
+        clamp06((e.clientY - (r.top + r.height / 2)) / r.height) / 0.6,
+        { source: 'pointer', priority: 1 }
       );
     }
   }
@@ -136,7 +142,8 @@
     if (!gazeRaf) gazeRaf = requestAnimationFrame(flushGaze);
   }, { passive: true });
   document.addEventListener('pointerleave', function () {
-    gazeTargets.forEach(function (t) { t.engine.clearGaze(); });
+    /* solo liberamos la fuente del puntero; si el tracker está activo sigue mandando */
+    gazeTargets.forEach(function (t) { t.engine.clearGaze({ source: 'pointer' }); });
   });
   window.addEventListener('resize', refreshGazeRects, { passive: true });
   window.addEventListener('scroll', refreshGazeRects, { passive: true });
@@ -164,7 +171,9 @@
     });
     main.on('tips', function (e) { showTips(e.text); });
     main.on('error', function (e) { lastErrorAt = performance.now(); toast(e.message, 'danger'); });
-    watchGaze(main, elStage);
+    /* v2.4: sin watchGaze(main, elStage) — la mirada del principal es
+     * exclusiva del tracker facial; sin tracking activo queda al reposo
+     * autónomo del motor (sacadas/derivado de escena). */
     window.MM_MAIN = main;   /* punto de acceso de depuración en consola */
   }
 
@@ -864,6 +873,214 @@
     buildThumbs();
     updateMeta();
     highlightSelected();
+    initTrackingUI();
+  }
+
+  /* ---------------- UI de seguimiento facial (v2.3) ----------------
+   * Botón en el cajón + badge flotante sobre el escenario. El bridge se crea
+   * bajo demanda contra window.MM_MAIN; si createMain reconstruye la instancia
+   * (cambio de personaje), se reengancha al nuevo motor sin reiniciar la cámara.
+   * Flujo: MediaDeviceManager.startTrackingCamera (permisos centralizados, D14)
+   *      → backend Worker|Main (auto por feature-detection) → Filters OneEuro
+   *      → setGaze{source:'tracker',priority:10} / setEyeOpen / setLookYaw / resetIdle. */
+  var trackBridge = null, trackMedia = null, trackingOn = false;
+
+  function ensureTrackMedia() {
+    if (trackMedia) return trackMedia;
+    if (!window.MM_Media) throw new Error('MM_Media no está cargado');
+    trackMedia = MM.media || new window.MM_Media.MediaDeviceManager({});
+    return trackMedia;
+  }
+
+  function updateTrackBadge(state, reason) {
+    var b = $('trackBadge');
+    if (!b) return;
+    b.hidden = !trackingOn;
+    b.textContent = '· ' + state + (reason && state === 'ERROR' ? ': ' + reason : '');
+    b.className = 'track-badge st-' + String(state).toLowerCase();
+  }
+
+  async function startTracking() {
+    if (trackingOn) return;
+    if (!window.MM_Tracking || !window.MM_EmotionPolicy) {
+      toast('Módulos de tracking no cargados (EmotionPolicy/Filters/MpLoader/Backends/TrackingBridge)', 'danger');
+      return;
+    }
+    var mate = window.MM_MAIN;
+    if (!mate) { toast('El personaje principal aún no está listo', 'danger'); return; }
+    var btn = $('faceTrackToggle'), elPrev = $('trackPreview');
+    try {
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Cargando modelo…'; }
+      updateTrackBadge('ACQUIRING', null);
+      var media = ensureTrackMedia();
+      /* v2.3.1 FIX — El bridge pedía cámara sin consentimiento previo y sin
+       * enumDevices(): en Chrome no-seguro o con permiso "preguntar" el
+       * getUserMedia interno rechazaba y el badge se quedaba en ERROR antes
+       * de que el usuario viera siquiera el diálogo. Secuencia robusta:
+       * requestPermissions (diálogo garantizado) → refreshDevices (labels) →
+       * deviceId exacto si hay varios. */
+      if (typeof media.requestPermissions === 'function') {
+        try { await media.requestPermissions(); } catch (e) { throw e; }
+      }
+      try { await media.refreshDevices(); } catch (e) { console.warn('[tracking] enumerate:', e.message); }
+      var cams = (media.devices && media.devices.videoinputs) || [];
+      var camId = '';
+      for (var ci = 0; ci < cams.length; ci++) {
+        if (cams[ci].deviceId) { camId = cams[ci].deviceId; break; }
+      }
+      var policy = window.MM_SHARED_POLICY || window.MM_EmotionPolicy.create({
+        exists: function (id) { return !!MM.config.getRaw(id); }
+      });
+      /* v2.5 FIX — el preview se pintaba ANTES de trackBridge.start(): en ese
+       * instante trackingCamera.stream aún era null y el <video> quedaba con
+       * srcObject=null aunque el badge dijera ACTIVE. Ahora, tras el arranque
+       * exitoso, con fallback al stream del propio bridge si el media manager
+       * no lo expone. */
+      trackBridge = window.MM_Tracking.create({
+        mate: mate,
+        media: media,                       /* D14: segunda CameraManager interna */
+        policy: policy,
+        deviceId: camId,
+        constraints: { width: 320, height: 240, frameRate: 30, facingMode: 'user' },
+        mirror: true,
+        maxFaces: 3,                        /* plan §3: FaceSelector multi-cara */
+        signals: false,                     /* el tracking NO cambia emociones en la galería */
+        lostAfterMs: 800
+      });
+      trackBridge.on(function (evt, data) {
+        if (evt === 'state') updateTrackBadge(data.to, data.reason);
+        if (evt === 'warning') console.warn('[tracking]', data.message);
+      });
+      await trackBridge.start();
+      trackingOn = true;
+      if (elPrev) {
+        var prevStream = (media.trackingCamera && media.trackingCamera.stream) ||
+          (trackMedia && trackMedia.trackingCamera && trackMedia.trackingCamera.stream) ||
+          (typeof trackBridge.getStream === 'function' ? trackBridge.getStream() : null);
+        if (prevStream) {
+          elPrev.srcObject = prevStream;
+          elPrev.muted = true; elPrev.playsInline = true;
+          elPrev.style.transform = 'scaleX(-1)';
+          elPrev.hidden = false;
+          elPrev.play().catch(function () {});
+        }
+      }
+      if (btn) btn.textContent = 'Seguimiento facial: ON';
+      btn && btn.classList.add('active');
+      updateTrackBadge(trackBridge.state);
+      toast('Seguimiento facial activo — el bot sigue tu rostro', 'ok');
+    } catch (e) {
+      trackingOn = false;
+      if (btn) { btn.textContent = 'Seguimiento facial: OFF'; btn.classList.remove('active'); }
+      if (elPrev) elPrev.hidden = true;
+      updateTrackBadge('ERROR', String(e.message || e));
+      if (String(e.name || '') === 'NotAllowedError') toast('Permiso de cámara denegado', 'danger');
+      else toast('No se pudo iniciar el tracking: ' + (e.message || e), 'danger');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function stopTracking() {
+    trackingOn = false;
+    /* El stream se conserva si un puente externo (llamada) lo está reutilizando:
+     * destroy() del bridge con opts.stream no lo cierra, pero el de la galería sí
+     * liberaría trackingCamera — solo cuando nadie lo tiene. */
+    var externalUser = window.MM_TRACKING && window.MM_TRACKING.callBridgeActive;
+    if (trackBridge) { try { trackBridge.destroy(); } catch (e) { console.warn(e); } trackBridge = null; }
+    if (!externalUser) {
+      /* Liberar SIEMPRE la cámara de tracking, incluso si destroy() lanzó:
+       * sin esto la luz LED quedaba encendida tras un fallo de teardown. */
+      try {
+        if (trackMedia && typeof trackMedia.stopTrackingCamera === 'function' &&
+            trackMedia.trackingCamera && trackMedia.trackingCamera.isRunning()) {
+          trackMedia.stopTrackingCamera();
+        }
+      } catch (e) { console.warn('[tracking] release camera:', e.message || e); }
+    }
+    var btn = $('faceTrackToggle'), elPrev = $('trackPreview');
+    if (btn) { btn.textContent = 'Seguimiento facial: OFF'; btn.classList.remove('active'); }
+    if (elPrev) { elPrev.hidden = true; elPrev.srcObject = null; }
+    updateTrackBadge('IDLE');
+  }
+
+  /* ---------------- Contrato global MM_TRACKING (v2.4, usado por call.js) ----------------
+   * Expone suspend/restore/getStream sin acoplar módulos: call.js nunca importa
+   * el internals de app.js; solo este objeto. wasActiveBeforeCall permite saber
+   * si al colgar hay que reenganchar la galería. */
+  var _wasActiveBeforeCall = false;
+  Object.defineProperty(window, 'MM_TRACKING', {
+    configurable: true,
+    value: {
+      get active() { return trackingOn; },
+      get state() { return trackBridge ? trackBridge.state : 'IDLE'; },
+      getStream: function () {
+        if (!trackingOn || !trackMedia || !trackMedia.trackingCamera) return null;
+        return trackMedia.trackingCamera.stream || null;
+      },
+      get callBridgeActive() {
+        return !!(window.MM_TRACKING._callBridgeRef);
+      },
+      setCallBridge: function (b) { window.MM_TRACKING._callBridgeRef = b || null; },
+      suspendForCall: function () {
+        _wasActiveBeforeCall = trackingOn;
+        if (!trackingOn) return;
+        /* NO destructimos ni liberamos la cámara: el stream pasa a manos del
+         * bridge de llamada. Paramos inferencia+rAF y liberamos canales del bot. */
+        if (trackBridge) { try { trackBridge.suspend(); } catch (e) { console.warn(e); } }
+        updateTrackBadge('LOST', 'en-llamada');
+      },
+      restoreAfterCall: function () {
+        var shouldRestore = _wasActiveBeforeCall;
+        _wasActiveBeforeCall = false;
+        if (!shouldRestore || !trackBridge) return;
+        try { trackBridge.resume(); updateTrackBadge(trackBridge.state); }
+        catch (e) { toast('No se pudo reanudar el seguimiento: ' + (e.message || e), 'danger'); }
+      },
+      get wasActiveBeforeCall() { return _wasActiveBeforeCall; },
+      /* Reancla el bridge de LA LLAMADA al bot nuevo (buildBot en cambio de personaje). */
+      callRebind: function (newMate) {
+        var b = window.MM_TRACKING._callBridgeRef;
+        if (b && typeof b.rebindMate === 'function') b.rebindMate(newMate);
+      }
+    }
+  });
+
+  /* Reenganche tras createMain(): MM_MAIN cambia de identidad al cambiar de
+   * personaje. Envolvemos la asignación del global: si el bridge activo apunta a
+   * la instancia vieja, se reancla SIN reiniciar cámara ni recargar MediaPipe
+   * (rebindMate) — stop/start implicaba cerrar getUserMedia, reabrirlo y volver
+   * a crear el landmarker en cada cambio de personaje. */
+  var _mmMain = null;
+  Object.defineProperty(window, 'MM_MAIN', {
+    configurable: true,
+    enumerable: true,
+    get: function () { return _mmMain; },
+    set: function (v) {
+      _mmMain = v;
+      if (trackingOn && trackBridge && trackBridge.adapter &&
+          typeof trackBridge.adapter.mate === 'object' && trackBridge.adapter.mate !== v) {
+        try {
+          trackBridge.rebindMate(v);
+          toast('Seguimiento reasignado al nuevo personaje', 'ok');
+        } catch (e) {
+          /* el motor nuevo no expone handleAIMessage u otro requisito del
+           * adapter: degradar con error visible (criterio §C: nunca simular) */
+          stopTracking();
+          updateTrackBadge('ERROR', String(e.message || e));
+          toast('Tracking detenido: el nuevo personaje no admite seguimiento (' + (e.message || e) + ')', 'danger');
+        }
+      }
+    }
+  });
+
+  function initTrackingUI() {
+    var btn = $('faceTrackToggle');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      if (trackingOn) stopTracking(); else startTracking();
+    });
+    updateTrackBadge('IDLE');
   }
 
   /* Catálogo externo opcional: si existe data/emotions.json se aplica antes de arrancar.

@@ -79,6 +79,7 @@
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
           </button>
           <div id="tips" class="tips" role="status"></div>
+          <div id="trackBadge" class="track-badge" hidden></div>
           <div id="stage" class="stage"></div>
           <div class="emo-meta">
             <span id="emoId" class="emo-id">ID --</span>
@@ -161,6 +162,15 @@
     </section>
 
     <section class="drawer-sec">
+      <h3 data-i18n="secTracking">Seguimiento facial</h3>
+      <div class="btn-row">
+        <button type="button" id="faceTrackToggle" class="btn">🎭 Seguimiento facial: OFF</button>
+      </div>
+      <video id="trackPreview" class="track-preview" autoplay playsinline muted hidden></video>
+      <p class="call-hint">Requiere HTTPS o localhost y permiso de cámara. El bot sigue tu rostro, párpados y giro de cabeza. La mirada por puntero queda reservada a los elementos decorativos; el avatar principal solo responde al tracker.</p>
+    </section>
+
+    <section class="drawer-sec">
       <h3 data-i18n="secConfig">Configuración</h3>
       <div class="btn-row">
         <button type="button" id="btnExport" class="btn" data-i18n="btnExport">Exportar configuración</button>
@@ -233,10 +243,20 @@
   <!-- Capa multimedia: dispositivos + WebRTC + sesión de llamada -->
   <script src="src/media/MediaDeviceManager.js"></script>
   <script src="src/media/WebRTCClient.js"></script>
+  <!-- AJUSTE 1 (v2.5): EmotionPolicy ANTES que CallSession (captura MM_EmotionPolicy al cargar) -->
+  <script src="src/media/EmotionPolicy.js"></script>
+  <!-- AJUSTE 2 (v2.5): única instancia de política compartida, antes que hosts y sesiones -->
+  <script src="site/shared-policy.js"></script>
   <script src="src/media/CallSession.js"></script>
+  <!-- v2.3 · Tracking facial: filtros + carga vendorizada + backends + selector + puente -->
+  <script src="src/tracking/Filters.js"></script>
+  <script src="src/tracking/MpLoader.js"></script>
+  <script src="src/tracking/Backends.js"></script>
+  <script src="src/tracking/FaceSelector.js"></script>
+  <script src="src/tracking/TrackingBridge.js"></script>
   <script src="site/i18n.js"></script>
   <script src="site/app.js"></script>
   <!-- Glue que integra la videollamada (call.html) dentro del index -->
-  <script src="site/call.js?v=1a"></script>
+  <script src="site/call.js?v=24a"></script>
 </body>
 </html>
